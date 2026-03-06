@@ -115,10 +115,8 @@ def _merchant_from_url(url: str) -> Optional[str]:
         if domain in host:
             return name
 
-    # For unknown domains, derive a name from the hostname
-    parts = host.split(".")
-    name = parts[0].capitalize() if parts else None
-    return name
+    # Unknown domains are excluded to ensure reliable results
+    return None
 
 
 # ---------------------------------------------------------------------------
