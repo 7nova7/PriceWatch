@@ -11,6 +11,7 @@ import logging
 import random
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import List, Optional
 from urllib.parse import urlparse
@@ -341,6 +342,7 @@ class PriceScraper:
 
         try:
             out: List[CompetitorPrice] = []
+            need_fetch: List[dict] = []  # items needing page fetch
             seen: set[str] = set()
 
             with DDGS() as ddgs:
@@ -360,28 +362,41 @@ class PriceScraper:
 
                 blob = f"{item.get('title', '')} {item.get('body', '')}"
                 all_prices = self._extract_dollar_prices(blob)
-
-                # Keep only prices in a reasonable range
                 reasonable = [p for p in all_prices if lo <= p <= hi]
 
                 if reasonable:
-                    # Pick the price closest to ours (most likely the actual product)
                     best = min(reasonable, key=lambda p: abs(p - our_price))
-                else:
-                    # Fallback: fetch the actual page to extract the price
-                    page_price = self._fetch_page_price(href, our_price)
-                    if page_price is None:
-                        continue
-                    best = page_price
-                out.append(
-                    CompetitorPrice(
-                        merchant=merchant,
-                        price=best,
-                        title=item.get("title", "")[:120],
-                        url=href,
+                    out.append(
+                        CompetitorPrice(
+                            merchant=merchant, price=best,
+                            title=item.get("title", "")[:120], url=href,
+                        )
                     )
-                )
+                else:
+                    # Queue for parallel page fetch
+                    need_fetch.append({"href": href, "merchant": merchant, "title": item.get("title", "")[:120]})
                 seen.add(m_lower)
+
+            # Fetch pages in parallel for items without snippet prices
+            if need_fetch:
+                with ThreadPoolExecutor(max_workers=min(6, len(need_fetch))) as pool:
+                    futures = {
+                        pool.submit(self._fetch_page_price, nf["href"], our_price): nf
+                        for nf in need_fetch
+                    }
+                    for future in as_completed(futures):
+                        nf = futures[future]
+                        try:
+                            price = future.result()
+                            if price is not None:
+                                out.append(
+                                    CompetitorPrice(
+                                        merchant=nf["merchant"], price=price,
+                                        title=nf["title"], url=nf["href"],
+                                    )
+                                )
+                        except Exception:
+                            pass
 
             return out
         except Exception as exc:

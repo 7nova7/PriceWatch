@@ -378,26 +378,40 @@ with reset_col:
         st.rerun()
 
 if run_btn:
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     scraper = PriceScraper(delay=delay, max_results=max_results)
-    results: List[ProductComparison] = []
+    results: List[ProductComparison] = [None] * n  # preserve order
 
     bar = st.progress(0, text="Initialising scanner...")
     info = st.empty()
 
-    for idx, (_, row) in enumerate(work_df.iterrows()):
-        pct = idx / n
-        bar.progress(pct, text=f"Scanning {idx + 1}/{n}: {row['product_name'][:55]}...")
-        with info.container():
-            st.info(f"Searching for **{row['product_name']}** ({row['brand']})")
+    max_workers = min(4, n)  # parallel product scans
 
-        comp = scraper.get_competitor_prices(
+    def _scan_row(idx_row):
+        idx, row = idx_row
+        return idx, scraper.get_competitor_prices(
             sku=str(row["sku"]),
             description=str(row["product_name"]),
             brand=str(row.get("brand", "")),
             category=str(row.get("category", "")),
             our_price=float(row["price"]),
         )
-        results.append(comp)
+
+    completed = 0
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = {
+            pool.submit(_scan_row, (idx, row)): idx
+            for idx, (_, row) in enumerate(work_df.iterrows())
+        }
+        for future in as_completed(futures):
+            completed += 1
+            idx, comp = future.result()
+            results[idx] = comp
+            pct = completed / n
+            bar.progress(pct, text=f"Scanned {completed}/{n}: {comp.description[:55]}...")
+            with info.container():
+                st.info(f"Completed **{comp.description}** ({comp.brand})")
 
     bar.progress(1.0, text="Scan complete!")
     info.empty()
