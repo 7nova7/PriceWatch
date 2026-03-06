@@ -16,8 +16,19 @@ from typing import List, Optional
 from urllib.parse import urlparse
 
 import requests
+from bs4 import BeautifulSoup
 
 logger = logging.getLogger(__name__)
+
+# Browser-like headers for page fetching
+_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+}
 
 # ---------------------------------------------------------------------------
 # Known retailer domain -> display name
@@ -235,6 +246,82 @@ class PriceScraper:
                 pass
         return prices
 
+    # -- page-level price extraction ----------------------------------------
+
+    def _fetch_page_price(self, url: str, our_price: float) -> Optional[float]:
+        """Fetch an actual product page and extract the price from HTML."""
+        try:
+            resp = requests.get(url, headers=_HEADERS, timeout=8, allow_redirects=True)
+            if resp.status_code != 200:
+                return None
+
+            soup = BeautifulSoup(resp.text, "lxml")
+
+            # Strategy 1: Look for common price-related meta tags
+            for meta in soup.find_all("meta"):
+                prop = (meta.get("property") or meta.get("name") or "").lower()
+                if "price" in prop and "currency" not in prop:
+                    content = meta.get("content", "")
+                    price = self.parse_price(content)
+                    if price and our_price * 0.30 <= price <= our_price * 2.5:
+                        return price
+
+            # Strategy 2: Look for JSON-LD structured data with price
+            for script in soup.find_all("script", type="application/ld+json"):
+                try:
+                    import json
+                    data = json.loads(script.string or "")
+                    prices = self._extract_jsonld_prices(data)
+                    reasonable = [p for p in prices if our_price * 0.30 <= p <= our_price * 2.5]
+                    if reasonable:
+                        return min(reasonable, key=lambda p: abs(p - our_price))
+                except (json.JSONDecodeError, TypeError):
+                    continue
+
+            # Strategy 3: Look for price in common HTML patterns
+            price_selectors = [
+                '[data-price]', '[class*="price" i]', '[id*="price" i]',
+                '[class*="Price" i]', '[class*="amount" i]',
+            ]
+            for selector in price_selectors:
+                for el in soup.select(selector):
+                    # Check data-price attribute first
+                    data_price = el.get("data-price")
+                    if data_price:
+                        price = self.parse_price(data_price)
+                        if price and our_price * 0.30 <= price <= our_price * 2.5:
+                            return price
+                    # Then check text content
+                    text = el.get_text(strip=True)
+                    found = self._extract_dollar_prices(text)
+                    reasonable = [p for p in found if our_price * 0.30 <= p <= our_price * 2.5]
+                    if reasonable:
+                        return min(reasonable, key=lambda p: abs(p - our_price))
+
+        except Exception as exc:
+            logger.debug("Page fetch failed for %s: %s", url, exc)
+        return None
+
+    @staticmethod
+    def _extract_jsonld_prices(data) -> List[float]:
+        """Recursively extract prices from JSON-LD structured data."""
+        prices: List[float] = []
+        if isinstance(data, dict):
+            for key, val in data.items():
+                if key.lower() in ("price", "lowprice", "highprice"):
+                    try:
+                        p = float(str(val).replace(",", "").replace("$", ""))
+                        if p > 0:
+                            prices.append(p)
+                    except (ValueError, TypeError):
+                        pass
+                else:
+                    prices.extend(PriceScraper._extract_jsonld_prices(val))
+        elif isinstance(data, list):
+            for item in data:
+                prices.extend(PriceScraper._extract_jsonld_prices(item))
+        return prices
+
     # -- DDG text search with price extraction ------------------------------
 
     def _ddg_search(self, query: str, our_price: float) -> List[CompetitorPrice]:
@@ -276,11 +363,16 @@ class PriceScraper:
 
                 # Keep only prices in a reasonable range
                 reasonable = [p for p in all_prices if lo <= p <= hi]
-                if not reasonable:
-                    continue
 
-                # Pick the price closest to ours (most likely the actual product)
-                best = min(reasonable, key=lambda p: abs(p - our_price))
+                if reasonable:
+                    # Pick the price closest to ours (most likely the actual product)
+                    best = min(reasonable, key=lambda p: abs(p - our_price))
+                else:
+                    # Fallback: fetch the actual page to extract the price
+                    page_price = self._fetch_page_price(href, our_price)
+                    if page_price is None:
+                        continue
+                    best = page_price
                 out.append(
                     CompetitorPrice(
                         merchant=merchant,
