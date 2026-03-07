@@ -33,7 +33,7 @@ def _extract_json(text: str) -> dict:
 class PriceIntelligenceAgents:
     """Multi-agent AI system using Claude for competitive price intelligence."""
 
-    def __init__(self, api_key: str, model: str = "claude-3-5-sonnet-20241022"):
+    def __init__(self, api_key: str, model: str = "claude-sonnet-4-20250514"):
         import anthropic
 
         self.client = anthropic.Anthropic(api_key=api_key)
@@ -122,7 +122,7 @@ class PriceIntelligenceAgents:
         # -- pre-aggregate so we don't blow the token budget ----------------
         by_cat: Dict[str, Dict[str, Any]] = {}
         by_brand: Dict[str, Dict[str, Any]] = {}
-        competitive_n = overpriced_n = 0
+        competitive_n = overpriced_n = underpriced_n = 0
 
         for p in pricing_data:
             cat = p.get("category", "Other")
@@ -131,11 +131,14 @@ class PriceIntelligenceAgents:
             gap = p.get("savings_opportunity", 0) or 0
             diff = p.get("pct_diff") or 0
 
-            by_cat.setdefault(cat, {"n": 0, "comp": 0, "high": 0, "gap": 0})
+            by_cat.setdefault(cat, {"n": 0, "comp": 0, "high": 0, "under": 0, "gap": 0})
             by_cat[cat]["n"] += 1
             if status == "competitive":
                 by_cat[cat]["comp"] += 1
                 competitive_n += 1
+            elif status == "underpriced":
+                by_cat[cat]["under"] += 1
+                underpriced_n += 1
             elif status == "high":
                 by_cat[cat]["high"] += 1
                 overpriced_n += 1
@@ -156,6 +159,7 @@ class PriceIntelligenceAgents:
 
         cat_lines = "\n".join(
             f"  {c}: {d['n']} products | {d['comp']} competitive | "
+            f"{d.get('under', 0)} underpriced | "
             f"{d['high']} overpriced | gap ${d['gap']:,.0f}"
             for c, d in sorted(by_cat.items())
         )
@@ -184,7 +188,8 @@ class PriceIntelligenceAgents:
                     "content": (
                         f"COMPETITIVE PRICING ANALYSIS\n"
                         f"Total products: {len(pricing_data)}  |  "
-                        f"Competitive: {competitive_n}  |  Overpriced: {overpriced_n}\n\n"
+                        f"Competitive: {competitive_n}  |  Underpriced: {underpriced_n}  |  "
+                        f"Overpriced: {overpriced_n}\n\n"
                         f"BY CATEGORY:\n{cat_lines}\n\n"
                         f"BY BRAND (top 15 by premium):\n{brand_lines}\n\n"
                         f"TOP 10 OVERPRICED:\n{over_lines}\n\n"

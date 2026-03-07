@@ -68,7 +68,8 @@ section[data-testid="stSidebar"] .stDownloadButton button{background:#2563eb;col
 /* --- badges --------------------------------------------------------- */
 .bg{display:inline-block;padding:3px 12px;border-radius:30px;font-weight:700;font-size:.78rem}
 .bg-g{background:#dcfce7;color:#166534}.bg-y{background:#fef9c3;color:#854d0e}
-.bg-r{background:#fee2e2;color:#991b1b}.bg-x{background:#f1f5f9;color:#475569}
+.bg-r{background:#fee2e2;color:#991b1b}.bg-b{background:#dbeafe;color:#1e40af}
+.bg-x{background:#f1f5f9;color:#475569}
 
 /* --- callout -------------------------------------------------------- */
 .call{background:#eff6ff;border-left:4px solid #2563eb;padding:.8rem 1rem;
@@ -165,6 +166,7 @@ def _badge(status):
         "competitive": ("Competitive", "bg-g"),
         "slightly_high": ("Slightly High", "bg-y"),
         "high": ("Overpriced", "bg-r"),
+        "underpriced": ("Underpriced", "bg-b"),
         "unknown": ("No Data", "bg-x"),
     }
     t, c = m.get(status, ("?", "bg-x"))
@@ -260,7 +262,7 @@ with st.sidebar:
     )
     model_choice = st.selectbox(
         "Claude Model",
-        ["claude-3-5-sonnet-20241022", "claude-3-5-haiku-20241022"],
+        ["claude-sonnet-4-20250514", "claude-haiku-4-5-20251001"],
         help="Sonnet is more capable; Haiku is faster & cheaper.",
     )
 
@@ -446,27 +448,83 @@ total = len(results)
 comp_n = sum(1 for r in results if r.price_status == "competitive")
 high_n = sum(1 for r in results if r.price_status == "high")
 slight_n = sum(1 for r in results if r.price_status == "slightly_high")
+under_n = sum(1 for r in results if r.price_status == "underpriced")
 unk_n = sum(1 for r in results if r.price_status == "unknown")
 total_gap = sum(r.savings_opportunity for r in results)
-score = comp_n / max(total - unk_n, 1) * 100
+score = (comp_n + under_n) / max(total - unk_n, 1) * 100
+
+# Status filter via session state (clicking a KPI card filters the list below)
+if "status_filter" not in st.session_state:
+    st.session_state["status_filter"] = None
 
 kpis = [
-    ("Products Scanned", str(total), "#2563eb"),
-    ("Competitive", str(comp_n), "#16a34a"),
-    ("Slightly High", str(slight_n), "#d97706"),
-    ("Overpriced", str(high_n), "#dc2626"),
-    ("Competitiveness Score", f"{score:.0f}%", "#7c3aed"),
-    ("Total Savings Gap", _usd(total_gap), "#0891b2"),
+    ("Products Scanned", str(total), "#2563eb", None),
+    ("Competitive", str(comp_n), "#16a34a", "competitive"),
+    ("Underpriced", str(under_n), "#2563eb", "underpriced"),
+    ("Slightly High", str(slight_n), "#d97706", "slightly_high"),
+    ("Overpriced", str(high_n), "#dc2626", "high"),
+    ("Competitiveness Score", f"{score:.0f}%", "#7c3aed", None),
+    ("Total Savings Gap", _usd(total_gap), "#0891b2", None),
 ]
 
 cols = st.columns(len(kpis))
-for col, (lab, val, clr) in zip(cols, kpis):
-    col.markdown(
-        f'<div class="kpi" style="border-top-color:{clr}">'
-        f'<div class="lab">{lab}</div>'
-        f'<div class="val" style="color:{clr}">{val}</div></div>',
+for col, (lab, val, clr, status_key) in zip(cols, kpis):
+    with col:
+        active = st.session_state.get("status_filter") == status_key and status_key is not None
+        border = f"3px solid {clr}" if active else "none"
+        col.markdown(
+            f'<div class="kpi" style="border-top-color:{clr};outline:{border}">'
+            f'<div class="lab">{lab}</div>'
+            f'<div class="val" style="color:{clr}">{val}</div></div>',
+            unsafe_allow_html=True,
+        )
+        if status_key is not None:
+            if col.button(f"View {lab}", key=f"kpi_{status_key}", use_container_width=True):
+                if st.session_state["status_filter"] == status_key:
+                    st.session_state["status_filter"] = None
+                else:
+                    st.session_state["status_filter"] = status_key
+                st.rerun()
+
+# --- Dynamic product listing when a KPI card is clicked ---
+active_filter = st.session_state.get("status_filter")
+if active_filter:
+    status_labels = {
+        "competitive": ("Competitive", "#16a34a"),
+        "underpriced": ("Underpriced", "#2563eb"),
+        "slightly_high": ("Slightly High", "#d97706"),
+        "high": ("Overpriced", "#dc2626"),
+    }
+    label, color = status_labels.get(active_filter, (active_filter, "#64748b"))
+    filtered = [r for r in results if r.price_status == active_filter]
+
+    st.markdown(
+        f'<div style="background:{color}11;border-left:4px solid {color};padding:0.8rem 1rem;'
+        f'border-radius:8px;margin:0.5rem 0 1rem">'
+        f'<strong style="color:{color}">{label} Products ({len(filtered)})</strong></div>',
         unsafe_allow_html=True,
     )
+
+    if filtered:
+        rows = []
+        for r in filtered:
+            sorted_c = sorted(r.competitor_prices, key=lambda c: c.price) if r.competitor_prices else []
+            c1 = sorted_c[0] if sorted_c else None
+            rows.append({
+                "SKU": r.sku,
+                "Product": r.description,
+                "Brand": r.brand,
+                "Category": r.category,
+                "Our Price": _usd(r.our_price),
+                "Lowest Competitor": f"{_usd(c1.price)} ({c1.merchant})" if c1 else "\u2014",
+                "% Diff": _pct(r.pct_diff),
+                "Gap": _usd(r.savings_opportunity),
+            })
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+    if st.button("Clear filter"):
+        st.session_state["status_filter"] = None
+        st.rerun()
 
 st.markdown("<br>", unsafe_allow_html=True)
 
@@ -479,13 +537,21 @@ tab_tbl, tab_detail, tab_charts, tab_ai, tab_export = st.tabs(
 # TAB 1 -- SUMMARY TABLE
 # ======================================================================
 with tab_tbl:
+    _STATUS_LABELS = {
+        "competitive": "Competitive",
+        "underpriced": "Underpriced",
+        "slightly_high": "Slightly High",
+        "high": "Overpriced",
+        "unknown": "No Data",
+    }
+
     fc1, fc2 = st.columns(2)
     with fc1:
         st_filter = st.multiselect(
             "Status",
-            ["competitive", "slightly_high", "high", "unknown"],
-            default=["competitive", "slightly_high", "high", "unknown"],
-            format_func=lambda s: {"competitive": "Competitive", "slightly_high": "Slightly High", "high": "Overpriced", "unknown": "No Data"}[s],
+            list(_STATUS_LABELS.keys()),
+            default=list(_STATUS_LABELS.keys()),
+            format_func=lambda s: _STATUS_LABELS[s],
         )
     with fc2:
         sort_by = st.selectbox("Sort by", ["% Diff", "Savings Opp.", "Our Price", "Min Competitor"])
@@ -498,16 +564,29 @@ with tab_tbl:
     for c in ["Our Price", "#1 Price", "#2 Price", "Min Competitor", "Avg Competitor", "Max Competitor", "Savings Opp."]:
         disp[c] = disp[c].apply(_usd)
     disp["% Diff"] = disp["% Diff"].apply(_pct)
-    disp["Status"] = disp["Status"].map(
-        {"competitive": "Competitive", "slightly_high": "Slightly High", "high": "Overpriced", "unknown": "No Data"}
-    )
+    disp["Status"] = disp["Status"].map(_STATUS_LABELS)
+
+    # Color-code rows based on status
+    def _row_color(row):
+        status = row.get("Status", "")
+        color_map = {
+            "Competitive": "background-color: #16a34a; color: white",
+            "Underpriced": "background-color: #2563eb; color: white",
+            "Slightly High": "background-color: #d97706; color: white",
+            "Overpriced": "background-color: #dc2626; color: white",
+            "No Data": "",
+        }
+        bg = color_map.get(status, "")
+        return [bg] * len(row)
+
     # Reorder columns to show top competitors prominently
     col_order = ["SKU", "Product", "Brand", "Category", "Our Price",
                  "#1 Price", "#1 Company", "#2 Price", "#2 Company",
                  "Min Competitor", "Avg Competitor", "Max Competitor",
                  "% Diff", "Savings Opp.", "Status", "# Competitors"]
     disp = disp[[c for c in col_order if c in disp.columns]]
-    st.dataframe(disp, use_container_width=True, height=min(600, 60 + len(disp) * 36))
+    styled = disp.style.apply(_row_color, axis=1)
+    st.dataframe(styled, use_container_width=True, height=min(600, 60 + len(disp) * 36))
 
 # ======================================================================
 # TAB 2 -- PRODUCT DEEP DIVE
@@ -629,8 +708,8 @@ with tab_charts:
         with cr:
             sc = rdf["Status"].value_counts().reset_index()
             sc.columns = ["Status", "Count"]
-            lbl = {"competitive": "Competitive", "slightly_high": "Slightly High", "high": "Overpriced", "unknown": "No Data"}
-            clrs = {"competitive": "#16a34a", "slightly_high": "#f59e0b", "high": "#dc2626", "unknown": "#94a3b8"}
+            lbl = {"competitive": "Competitive", "underpriced": "Underpriced", "slightly_high": "Slightly High", "high": "Overpriced", "unknown": "No Data"}
+            clrs = {"competitive": "#16a34a", "underpriced": "#2563eb", "slightly_high": "#f59e0b", "high": "#dc2626", "unknown": "#94a3b8"}
             sc["Label"] = sc["Status"].map(lbl)
             fig2 = px.pie(sc, names="Label", values="Count", hole=.55, color="Status", color_discrete_map=clrs)
             fig2.update_traces(textposition="outside", textinfo="percent+label")

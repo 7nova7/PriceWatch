@@ -177,6 +177,8 @@ class ProductComparison:
         if not self.competitor_prices:
             return "unknown"
         ratio = (self.our_price - self.min_price) / self.min_price * 100
+        if ratio < -5:
+            return "underpriced"
         if ratio <= 0:
             return "competitive"
         if ratio <= 15:
