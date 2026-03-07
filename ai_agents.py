@@ -33,7 +33,7 @@ def _extract_json(text: str) -> dict:
 class PriceIntelligenceAgents:
     """Multi-agent AI system using Claude for competitive price intelligence."""
 
-    def __init__(self, api_key: str, model: str = "claude-sonnet-4-5-20250514"):
+    def __init__(self, api_key: str, model: str = "claude-sonnet-4-6-20250620"):
         import anthropic
 
         self.client = anthropic.Anthropic(api_key=api_key)

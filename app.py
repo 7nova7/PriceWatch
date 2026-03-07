@@ -260,7 +260,7 @@ with st.sidebar:
     )
     model_choice = st.selectbox(
         "Claude Model",
-        ["claude-sonnet-4-5-20250514", "claude-haiku-4-5-20251001"],
+        ["claude-sonnet-4-6-20250620", "claude-haiku-4-5-20251001"],
         help="Sonnet is more capable; Haiku is faster & cheaper.",
     )
 
