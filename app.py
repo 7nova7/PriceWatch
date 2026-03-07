@@ -1,5 +1,5 @@
 """
-PriceWatch Pro  --  Competitor Price Intelligence Platform
+PriceHawk  --  Competitor Price Intelligence Platform
 ==========================================================
 Upload your product catalogue, scrape competitor prices from the web,
 and let Claude AI agents analyse market position & recommend pricing strategy.
@@ -26,7 +26,7 @@ from scraper import CompetitorPrice, PriceScraper, ProductComparison
 # ======================================================================
 
 st.set_page_config(
-    page_title="PriceWatch Pro",
+    page_title="PriceHawk",
     page_icon="\U0001F4B0",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -291,7 +291,7 @@ with st.sidebar:
 
 st.markdown(
     '<div class="hero">'
-    "<h1>PriceWatch Pro</h1>"
+    "<h1>PriceHawk</h1>"
     "<p>Upload your product catalogue \u2014 we scan the web and let Claude AI agents "
     "tell you exactly how your prices stack up.</p>"
     "</div>",
@@ -378,26 +378,40 @@ with reset_col:
         st.rerun()
 
 if run_btn:
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     scraper = PriceScraper(delay=delay, max_results=max_results)
-    results: List[ProductComparison] = []
+    results: List[ProductComparison] = [None] * n  # preserve order
 
     bar = st.progress(0, text="Initialising scanner...")
     info = st.empty()
 
-    for idx, (_, row) in enumerate(work_df.iterrows()):
-        pct = idx / n
-        bar.progress(pct, text=f"Scanning {idx + 1}/{n}: {row['product_name'][:55]}...")
-        with info.container():
-            st.info(f"Searching for **{row['product_name']}** ({row['brand']})")
+    max_workers = min(4, n)  # parallel product scans
 
-        comp = scraper.get_competitor_prices(
+    def _scan_row(idx_row):
+        idx, row = idx_row
+        return idx, scraper.get_competitor_prices(
             sku=str(row["sku"]),
             description=str(row["product_name"]),
             brand=str(row.get("brand", "")),
             category=str(row.get("category", "")),
             our_price=float(row["price"]),
         )
-        results.append(comp)
+
+    completed = 0
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = {
+            pool.submit(_scan_row, (idx, row)): idx
+            for idx, (_, row) in enumerate(work_df.iterrows())
+        }
+        for future in as_completed(futures):
+            completed += 1
+            idx, comp = future.result()
+            results[idx] = comp
+            pct = completed / n
+            bar.progress(pct, text=f"Scanned {completed}/{n}: {comp.description[:55]}...")
+            with info.container():
+                st.info(f"Completed **{comp.description}** ({comp.brand})")
 
     bar.progress(1.0, text="Scan complete!")
     info.empty()
@@ -899,7 +913,7 @@ with tab_export:
 st.markdown(
     '<hr style="border:none;border-top:1px solid #e2e8f0;margin:2rem 0 1rem">'
     '<p style="text-align:center;color:#94a3b8;font-size:.8rem">'
-    "PriceWatch Pro &middot; MSIS 521 Final Project &middot; "
+    "PriceHawk &middot; MSIS 521 Final Project &middot; "
     "Powered by DuckDuckGo Search &amp; Claude AI Agents"
     "</p>",
     unsafe_allow_html=True,

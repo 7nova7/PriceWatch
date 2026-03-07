@@ -11,13 +11,25 @@ import logging
 import random
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import List, Optional
 from urllib.parse import urlparse
 
 import requests
+from bs4 import BeautifulSoup
 
 logger = logging.getLogger(__name__)
+
+# Browser-like headers for page fetching
+_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.9",
+}
 
 # ---------------------------------------------------------------------------
 # Known retailer domain -> display name
@@ -115,10 +127,8 @@ def _merchant_from_url(url: str) -> Optional[str]:
         if domain in host:
             return name
 
-    # For unknown domains, derive a name from the hostname
-    parts = host.split(".")
-    name = parts[0].capitalize() if parts else None
-    return name
+    # Unknown domains are excluded to ensure reliable results
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -192,9 +202,10 @@ class ProductComparison:
 class PriceScraper:
     """Fetch competitor prices via DuckDuckGo text search + price extraction."""
 
-    def __init__(self, delay: float = 2.5, max_results: int = 6):
+    def __init__(self, delay: float = 2.5, max_results: int = 6, region: str = "wt-wt"):
         self.delay = delay
         self.max_results = max_results
+        self.region = region
 
     # -- price helpers ------------------------------------------------------
 
@@ -236,6 +247,82 @@ class PriceScraper:
                 pass
         return prices
 
+    # -- page-level price extraction ----------------------------------------
+
+    def _fetch_page_price(self, url: str, our_price: float) -> Optional[float]:
+        """Fetch an actual product page and extract the price from HTML."""
+        try:
+            resp = requests.get(url, headers=_HEADERS, timeout=8, allow_redirects=True)
+            if resp.status_code != 200:
+                return None
+
+            soup = BeautifulSoup(resp.text, "lxml")
+
+            # Strategy 1: Look for common price-related meta tags
+            for meta in soup.find_all("meta"):
+                prop = (meta.get("property") or meta.get("name") or "").lower()
+                if "price" in prop and "currency" not in prop:
+                    content = meta.get("content", "")
+                    price = self.parse_price(content)
+                    if price and our_price * 0.30 <= price <= our_price * 2.5:
+                        return price
+
+            # Strategy 2: Look for JSON-LD structured data with price
+            for script in soup.find_all("script", type="application/ld+json"):
+                try:
+                    import json
+                    data = json.loads(script.string or "")
+                    prices = self._extract_jsonld_prices(data)
+                    reasonable = [p for p in prices if our_price * 0.30 <= p <= our_price * 2.5]
+                    if reasonable:
+                        return min(reasonable, key=lambda p: abs(p - our_price))
+                except (json.JSONDecodeError, TypeError):
+                    continue
+
+            # Strategy 3: Look for price in common HTML patterns
+            price_selectors = [
+                '[data-price]', '[class*="price" i]', '[id*="price" i]',
+                '[class*="Price" i]', '[class*="amount" i]',
+            ]
+            for selector in price_selectors:
+                for el in soup.select(selector):
+                    # Check data-price attribute first
+                    data_price = el.get("data-price")
+                    if data_price:
+                        price = self.parse_price(data_price)
+                        if price and our_price * 0.30 <= price <= our_price * 2.5:
+                            return price
+                    # Then check text content
+                    text = el.get_text(strip=True)
+                    found = self._extract_dollar_prices(text)
+                    reasonable = [p for p in found if our_price * 0.30 <= p <= our_price * 2.5]
+                    if reasonable:
+                        return min(reasonable, key=lambda p: abs(p - our_price))
+
+        except Exception as exc:
+            logger.debug("Page fetch failed for %s: %s", url, exc)
+        return None
+
+    @staticmethod
+    def _extract_jsonld_prices(data) -> List[float]:
+        """Recursively extract prices from JSON-LD structured data."""
+        prices: List[float] = []
+        if isinstance(data, dict):
+            for key, val in data.items():
+                if key.lower() in ("price", "lowprice", "highprice"):
+                    try:
+                        p = float(str(val).replace(",", "").replace("$", ""))
+                        if p > 0:
+                            prices.append(p)
+                    except (ValueError, TypeError):
+                        pass
+                else:
+                    prices.extend(PriceScraper._extract_jsonld_prices(val))
+        elif isinstance(data, list):
+            for item in data:
+                prices.extend(PriceScraper._extract_jsonld_prices(item))
+        return prices
+
     # -- DDG text search with price extraction ------------------------------
 
     def _ddg_search(self, query: str, our_price: float) -> List[CompetitorPrice]:
@@ -255,10 +342,11 @@ class PriceScraper:
 
         try:
             out: List[CompetitorPrice] = []
+            need_fetch: List[dict] = []  # items needing page fetch
             seen: set[str] = set()
 
             with DDGS() as ddgs:
-                items = list(ddgs.text(f"{query} buy price", max_results=15))
+                items = list(ddgs.text(f"{query} buy price", region=self.region, max_results=30))
 
             lo = our_price * 0.30
             hi = our_price * 2.5
@@ -274,26 +362,41 @@ class PriceScraper:
 
                 blob = f"{item.get('title', '')} {item.get('body', '')}"
                 all_prices = self._extract_dollar_prices(blob)
-
-                # Keep only prices in a reasonable range
                 reasonable = [p for p in all_prices if lo <= p <= hi]
-                if not reasonable:
-                    continue
 
-                # Pick the price closest to ours (most likely the actual product)
-                best = min(reasonable, key=lambda p: abs(p - our_price))
-                out.append(
-                    CompetitorPrice(
-                        merchant=merchant,
-                        price=best,
-                        title=item.get("title", "")[:120],
-                        url=href,
+                if reasonable:
+                    best = min(reasonable, key=lambda p: abs(p - our_price))
+                    out.append(
+                        CompetitorPrice(
+                            merchant=merchant, price=best,
+                            title=item.get("title", "")[:120], url=href,
+                        )
                     )
-                )
+                else:
+                    # Queue for parallel page fetch
+                    need_fetch.append({"href": href, "merchant": merchant, "title": item.get("title", "")[:120]})
                 seen.add(m_lower)
 
-                if len(out) >= self.max_results:
-                    break
+            # Fetch pages in parallel for items without snippet prices
+            if need_fetch:
+                with ThreadPoolExecutor(max_workers=min(6, len(need_fetch))) as pool:
+                    futures = {
+                        pool.submit(self._fetch_page_price, nf["href"], our_price): nf
+                        for nf in need_fetch
+                    }
+                    for future in as_completed(futures):
+                        nf = futures[future]
+                        try:
+                            price = future.result()
+                            if price is not None:
+                                out.append(
+                                    CompetitorPrice(
+                                        merchant=nf["merchant"], price=price,
+                                        title=nf["title"], url=nf["href"],
+                                    )
+                                )
+                        except Exception:
+                            pass
 
             return out
         except Exception as exc:
@@ -322,9 +425,17 @@ class PriceScraper:
             prices = self._ddg_search(f"{brand} {description}", our_price)
 
             # Strategy 2: include SKU
-            if len(prices) < 2:
+            seen = {p.merchant.lower() for p in prices}
+            if len(prices) < self.max_results:
                 more = self._ddg_search(f"{sku} {description}", our_price)
-                seen = {p.merchant.lower() for p in prices}
+                for p in more:
+                    if p.merchant.lower() not in seen:
+                        prices.append(p)
+                        seen.add(p.merchant.lower())
+
+            # Strategy 3: product name + category
+            if len(prices) < self.max_results:
+                more = self._ddg_search(f"{description} {category} price", our_price)
                 for p in more:
                     if p.merchant.lower() not in seen:
                         prices.append(p)
