@@ -2,11 +2,12 @@
 scraper.py  --  Multi-source competitor price scraping engine.
 
 Primary strategy: DuckDuckGo text search with intelligent price extraction
-from result snippets, filtering by retailer domains and price reasonableness.
+from result snippets, with page-level fallback for missing prices.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import random
 import re
@@ -89,7 +90,7 @@ _MERCHANTS = {
     "underarmour.com": "Under Armour",
 }
 
-# Sites we skip (aggregators / review / news — not actual retailers)
+# Sites we skip (aggregators / review / news -- not actual retailers)
 _SKIP_DOMAINS = {
     # review / news / tech blogs
     "gsmarena.com", "tomsguide.com", "techradar.com", "pcmag.com",
@@ -200,12 +201,11 @@ class ProductComparison:
 # ---------------------------------------------------------------------------
 
 class PriceScraper:
-    """Fetch competitor prices via DuckDuckGo text search + price extraction."""
+    """Fetch competitor prices via DuckDuckGo text search + page-level fallback."""
 
-    def __init__(self, delay: float = 2.5, max_results: int = 6, region: str = "wt-wt"):
+    def __init__(self, delay: float = 2.5, max_results: int = 6):
         self.delay = delay
         self.max_results = max_results
-        self.region = region
 
     # -- price helpers ------------------------------------------------------
 
@@ -257,6 +257,8 @@ class PriceScraper:
                 return None
 
             soup = BeautifulSoup(resp.text, "lxml")
+            lo = our_price * 0.30
+            hi = our_price * 2.5
 
             # Strategy 1: Look for common price-related meta tags
             for meta in soup.find_all("meta"):
@@ -264,16 +266,15 @@ class PriceScraper:
                 if "price" in prop and "currency" not in prop:
                     content = meta.get("content", "")
                     price = self.parse_price(content)
-                    if price and our_price * 0.30 <= price <= our_price * 2.5:
+                    if price and lo <= price <= hi:
                         return price
 
             # Strategy 2: Look for JSON-LD structured data with price
             for script in soup.find_all("script", type="application/ld+json"):
                 try:
-                    import json
                     data = json.loads(script.string or "")
                     prices = self._extract_jsonld_prices(data)
-                    reasonable = [p for p in prices if our_price * 0.30 <= p <= our_price * 2.5]
+                    reasonable = [p for p in prices if lo <= p <= hi]
                     if reasonable:
                         return min(reasonable, key=lambda p: abs(p - our_price))
                 except (json.JSONDecodeError, TypeError):
@@ -286,16 +287,14 @@ class PriceScraper:
             ]
             for selector in price_selectors:
                 for el in soup.select(selector):
-                    # Check data-price attribute first
                     data_price = el.get("data-price")
                     if data_price:
                         price = self.parse_price(data_price)
-                        if price and our_price * 0.30 <= price <= our_price * 2.5:
+                        if price and lo <= price <= hi:
                             return price
-                    # Then check text content
                     text = el.get_text(strip=True)
                     found = self._extract_dollar_prices(text)
-                    reasonable = [p for p in found if our_price * 0.30 <= p <= our_price * 2.5]
+                    reasonable = [p for p in found if lo <= p <= hi]
                     if reasonable:
                         return min(reasonable, key=lambda p: abs(p - our_price))
 
@@ -328,8 +327,8 @@ class PriceScraper:
     def _ddg_search(self, query: str, our_price: float) -> List[CompetitorPrice]:
         """Search DuckDuckGo, extract prices from result snippets.
 
-        We only keep results from recognisable retailer domains and filter
-        prices to a reasonable range around our own price.
+        Falls back to fetching actual product pages (in parallel) when
+        snippets don't contain prices.
         """
         try:
             from ddgs import DDGS
@@ -342,11 +341,11 @@ class PriceScraper:
 
         try:
             out: List[CompetitorPrice] = []
-            need_fetch: List[dict] = []  # items needing page fetch
+            need_fetch: List[dict] = []
             seen: set[str] = set()
 
             with DDGS() as ddgs:
-                items = list(ddgs.text(f"{query} buy price", region=self.region, max_results=30))
+                items = list(ddgs.text(f"{query} buy price", max_results=30))
 
             lo = our_price * 0.30
             hi = our_price * 2.5
@@ -374,7 +373,10 @@ class PriceScraper:
                     )
                 else:
                     # Queue for parallel page fetch
-                    need_fetch.append({"href": href, "merchant": merchant, "title": item.get("title", "")[:120]})
+                    need_fetch.append({
+                        "href": href, "merchant": merchant,
+                        "title": item.get("title", "")[:120],
+                    })
                 seen.add(m_lower)
 
             # Fetch pages in parallel for items without snippet prices
