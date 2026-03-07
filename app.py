@@ -1,5 +1,5 @@
 """
-PriceWatch Pro  --  Competitor Price Intelligence Platform
+PriceHawk  --  Competitor Price Intelligence Platform
 ==========================================================
 Upload your product catalogue, scrape competitor prices from the web,
 and let Claude AI agents analyse market position & recommend pricing strategy.
@@ -26,7 +26,7 @@ from scraper import CompetitorPrice, PriceScraper, ProductComparison
 # ======================================================================
 
 st.set_page_config(
-    page_title="PriceWatch Pro",
+    page_title="PriceHawk",
     page_icon="\U0001F4B0",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -291,7 +291,7 @@ with st.sidebar:
 
 st.markdown(
     '<div class="hero">'
-    "<h1>PriceWatch Pro</h1>"
+    "<h1>PriceHawk</h1>"
     "<p>Upload your product catalogue \u2014 we scan the web and let Claude AI agents "
     "tell you exactly how your prices stack up.</p>"
     "</div>",
@@ -913,7 +913,7 @@ with tab_export:
 st.markdown(
     '<hr style="border:none;border-top:1px solid #e2e8f0;margin:2rem 0 1rem">'
     '<p style="text-align:center;color:#94a3b8;font-size:.8rem">'
-    "PriceWatch Pro &middot; MSIS 521 Final Project &middot; "
+    "PriceHawk &middot; MSIS 521 Final Project &middot; "
     "Powered by DuckDuckGo Search &amp; Claude AI Agents"
     "</p>",
     unsafe_allow_html=True,
